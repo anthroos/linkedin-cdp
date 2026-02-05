@@ -1,0 +1,14 @@
+# Chrome profile with cookies - NEVER commit!
+chrome-debug-profile/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.log
+*.tmp
