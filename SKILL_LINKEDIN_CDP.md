@@ -4,9 +4,25 @@
 
 LinkedIn automation toolkit using Chrome DevTools Protocol (CDP). Enables programmatic interaction with LinkedIn for messaging, profile viewing, search, and connection management while maintaining human-like behavior to avoid detection.
 
-**Repository:** `linkedin-cdp`
+**Repository:** `linkedin-cdp` (PRIVATE)
 **Author:** Ivan Pasichnyk
 **License:** MIT
+
+---
+
+## Access
+
+This repository is **private** to prevent LinkedIn from patching the methods used.
+
+**To request access:**
+Contact Ivan Pasichnyk (ivan@welabeldata.com)
+
+**To grant access (for owner):**
+```bash
+gh repo add-collaborator anthroos/linkedin-cdp USERNAME
+```
+
+**Local path:** `/Users/ivanpasichnyk/linkedin-cdp/`
 
 ---
 
