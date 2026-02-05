@@ -21,13 +21,14 @@ class LinkedInSearch(LinkedInBot):
         super().__init__()
         self.limiter = RateLimiter() if use_rate_limiter else None
 
-    def _wait_for_results(self, timeout: int = 15) -> bool:
+    def _wait_for_results(self, timeout: int = 15, result_type: str = 'people') -> bool:
         """Wait for search results to load."""
         start = time.time()
+        link_pattern = '/in/' if result_type == 'people' else '/company/'
+
         while time.time() - start < timeout:
-            # Check for profile links which indicate results loaded
-            result = self._evaluate('''
-                document.querySelectorAll('a[href*="/in/"]').length > 5
+            result = self._evaluate(f'''
+                document.querySelectorAll('a[href*="{link_pattern}"]').length > 5
             ''')
             if result:
                 self._human_delay(500, 1000)
@@ -241,7 +242,7 @@ class LinkedInSearch(LinkedInBot):
         # Scroll to trigger lazy loading
         self._scroll_page()
 
-        if not self._wait_for_results():
+        if not self._wait_for_results(result_type='companies'):
             print("✗ No search results found")
             return []
 

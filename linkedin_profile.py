@@ -17,23 +17,54 @@ class LinkedInProfile(LinkedInBot):
         self.limiter = RateLimiter() if use_rate_limiter else None
 
     def navigate_to(self, url: str) -> bool:
-        """Navigate to a URL."""
+        """Navigate to a URL and reconnect to the tab."""
+        import requests
+        import websocket
+
         result = self._send("Page.navigate", {"url": url})
         if result.get("error"):
             print(f"✗ Navigation failed: {result.get('error')}")
             return False
 
-        time.sleep(2)
+        # Wait for page load
+        time.sleep(8)
+
+        # Reconnect to the tab after navigation
+        try:
+            resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
+            tabs = resp.json()
+
+            # Find the profile tab
+            target_tab = None
+            for tab in tabs:
+                tab_url = tab.get("url", "")
+                if "/in/" in tab_url and "linkedin.com" in tab_url:
+                    target_tab = tab
+                    break
+
+            if target_tab and target_tab.get("webSocketDebuggerUrl"):
+                if self.ws:
+                    try:
+                        self.ws.close()
+                    except:
+                        pass
+                self.ws_url = target_tab["webSocketDebuggerUrl"]
+                self.ws = websocket.create_connection(self.ws_url, timeout=30)
+                self.ws.settimeout(30)
+        except Exception as e:
+            print(f"  Warning: reconnect failed: {e}")
+
         self._human_delay(1000, 2000)
         return True
 
-    def _wait_for_profile(self, timeout: int = 10) -> bool:
+    def _wait_for_profile(self, timeout: int = 15) -> bool:
         """Wait for profile page to load."""
         start = time.time()
         while time.time() - start < timeout:
+            # Check if page has substantial content (profile pages are large)
             result = self._evaluate('''
-                document.querySelector('.pv-top-card') !== null ||
-                document.querySelector('.profile-photo-edit__preview') !== null
+                document.body.innerText.length > 5000 &&
+                window.location.href.includes('/in/')
             ''')
             if result:
                 self._human_delay(500, 1000)
@@ -69,34 +100,67 @@ class LinkedInProfile(LinkedInBot):
             print("✗ Profile page failed to load")
             return {}
 
-        # Extract basic info
+        # Extract basic info by parsing page text (LinkedIn uses dynamic selectors)
         profile_data = self._evaluate('''
             (() => {
                 const data = {};
+                const bodyText = document.body.innerText;
+                const lines = bodyText.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
 
-                // Name
-                const nameEl = document.querySelector('.pv-top-card h1') ||
-                              document.querySelector('.text-heading-xlarge');
-                data.name = nameEl ? nameEl.innerText.trim() : '';
+                // Find the name - it's usually after "Skip to main content" section, repeated twice
+                // Pattern: Name appears, then title, then location
+                let nameCandidate = '';
+                let titleCandidate = '';
+                let locationCandidate = '';
 
-                // Title/Headline
-                const titleEl = document.querySelector('.pv-top-card .text-body-medium') ||
-                               document.querySelector('.pv-top-card-profile-picture + div .text-body-medium');
-                data.title = titleEl ? titleEl.innerText.trim() : '';
+                // Skip navigation items
+                const skipWords = ['Home', 'My Network', 'Jobs', 'Messaging', 'Notifications', 'Me', 'For Business', 'Advertise', 'Skip to'];
+                let startIdx = 0;
 
-                // Location
-                const locationEl = document.querySelector('.pv-top-card .text-body-small.inline') ||
-                                  document.querySelector('.pv-top-card-profile-picture + div span.text-body-small');
-                data.location = locationEl ? locationEl.innerText.trim() : '';
+                for (let i = 0; i < Math.min(lines.length, 30); i++) {
+                    const line = lines[i];
+                    if (skipWords.some(w => line.includes(w))) continue;
+                    if (line === '0 notifications') continue;
 
-                // Profile image
-                const imgEl = document.querySelector('.pv-top-card-profile-picture__image') ||
-                             document.querySelector('.profile-photo-edit__preview');
+                    // First substantial line after nav is likely the name
+                    if (!nameCandidate && line.length > 3 && line.length < 50) {
+                        // Name should be letters/spaces, maybe dots
+                        if (/^[A-Za-zА-Яа-яІіЇїЄєҐґ\\s\\.\\-]+$/.test(line)) {
+                            nameCandidate = line;
+                            continue;
+                        }
+                    }
+
+                    // After name, next long line is title
+                    if (nameCandidate && !titleCandidate && line.length > 10 && line.length < 200) {
+                        if (line === 'Add section' || line === 'Open to') continue;
+                        if (line === nameCandidate) continue;
+                        titleCandidate = line;
+                        continue;
+                    }
+
+                    // After title, look for location (contains comma or country name)
+                    if (titleCandidate && !locationCandidate) {
+                        if (line === 'Add section' || line === 'Open to' || line === nameCandidate || line === titleCandidate) continue;
+                        if (line.includes(',') || line.includes('Ukraine') || line.includes('United') || line.includes('California') || line.includes('Kyiv')) {
+                            locationCandidate = line;
+                            break;
+                        }
+                    }
+                }
+
+                data.name = nameCandidate;
+                data.title = titleCandidate;
+                data.location = locationCandidate;
+
+                // Connection info
+                const connectMatch = bodyText.match(/(\\d+)\\s*connections?/i);
+                data.connections = connectMatch ? connectMatch[1] + ' connections' : '';
+
+                // Profile image - try to find by name
+                const firstName = nameCandidate.split(' ')[0];
+                const imgEl = firstName ? document.querySelector('img[alt*="' + firstName + '"]') : null;
                 data.image_url = imgEl ? imgEl.src : '';
-
-                // Connection count
-                const connectEl = document.querySelector('.pv-top-card--list-bullet li:first-child span');
-                data.connections = connectEl ? connectEl.innerText.trim() : '';
 
                 // About section
                 const aboutEl = document.querySelector('#about ~ .display-flex .inline-show-more-text span[aria-hidden="true"]') ||

@@ -20,23 +20,53 @@ class LinkedInConnect(LinkedInBot):
         self.limiter = RateLimiter() if use_rate_limiter else None
 
     def navigate_to(self, url: str) -> bool:
-        """Navigate to a URL."""
+        """Navigate to a URL and reconnect to the tab."""
+        import requests
+        import websocket
+
         result = self._send("Page.navigate", {"url": url})
         if result.get("error"):
             print(f"✗ Navigation failed: {result.get('error')}")
             return False
 
-        time.sleep(2)
+        # Wait for page load
+        time.sleep(8)
+
+        # Reconnect to the tab after navigation
+        try:
+            resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
+            tabs = resp.json()
+
+            # Find the matching tab
+            target_tab = None
+            for tab in tabs:
+                tab_url = tab.get("url", "")
+                if url.split('?')[0] in tab_url or ("/in/" in tab_url and "/in/" in url):
+                    target_tab = tab
+                    break
+
+            if target_tab and target_tab.get("webSocketDebuggerUrl"):
+                if self.ws:
+                    try:
+                        self.ws.close()
+                    except:
+                        pass
+                self.ws_url = target_tab["webSocketDebuggerUrl"]
+                self.ws = websocket.create_connection(self.ws_url, timeout=30)
+                self.ws.settimeout(30)
+        except Exception as e:
+            print(f"  Warning: reconnect failed: {e}")
+
         self._human_delay(1000, 2000)
         return True
 
-    def _wait_for_profile(self, timeout: int = 10) -> bool:
+    def _wait_for_profile(self, timeout: int = 15) -> bool:
         """Wait for profile page to load."""
         start = time.time()
         while time.time() - start < timeout:
             result = self._evaluate('''
-                document.querySelector('.pv-top-card') !== null ||
-                document.querySelector('.profile-photo-edit__preview') !== null
+                document.querySelector('h1') !== null &&
+                document.body.innerText.length > 1000
             ''')
             if result:
                 self._human_delay(500, 1000)
