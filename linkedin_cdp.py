@@ -28,34 +28,47 @@ class LinkedInBot:
             # Get available tabs
             resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
             tabs = resp.json()
-            
-            # Find LinkedIn messaging tab
+
+            # Find LinkedIn tab in priority order
             li_tab = None
+
+            # Priority 1: messaging tab
             for tab in tabs:
                 url = tab.get("url", "")
                 if "linkedin.com/messaging" in url:
                     li_tab = tab
                     break
-            
+
+            # Priority 2: any main LinkedIn page (not iframes/widgets)
             if not li_tab:
-                # Use first tab
+                for tab in tabs:
+                    url = tab.get("url", "")
+                    if "linkedin.com" in url:
+                        # Skip internal/iframe pages
+                        if any(x in url for x in ['/m/', 'protechts', 'merchantpool', 'licdn', '/lite/']):
+                            continue
+                        li_tab = tab
+                        break
+
+            # Fallback: first tab
+            if not li_tab:
                 li_tab = tabs[0] if tabs else None
-            
+
             if not li_tab:
                 print("✗ No tabs found")
                 return False
-            
+
             self.ws_url = li_tab.get("webSocketDebuggerUrl")
             if not self.ws_url:
                 print("✗ No WebSocket URL")
                 return False
-            
+
             # Connect WebSocket with longer timeout
             self.ws = websocket.create_connection(self.ws_url, timeout=30)
             self.ws.settimeout(30)
             print(f"✓ Connected to: {li_tab.get('title', 'Unknown')[:50]}")
             return True
-            
+
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False

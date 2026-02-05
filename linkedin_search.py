@@ -45,18 +45,26 @@ class LinkedInSearch(LinkedInBot):
             print(f"✗ Navigation failed: {result.get('error')}")
             return False
 
-        # Wait for page load (LinkedIn needs more time to render)
-        time.sleep(8)
+        # Wait for page load (LinkedIn needs time to render, especially company search)
+        time.sleep(12)
 
         # Reconnect to the tab after navigation
         try:
             resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
             tabs = resp.json()
 
-            # Find the tab with our URL
+            # Find the tab with our search type (people/companies)
             target_tab = None
+            search_type = 'companies' if '/companies/' in url else 'people' if '/people/' in url else ''
+
             for tab in tabs:
-                if url.split('?')[0] in tab.get("url", ""):
+                tab_url = tab.get("url", "")
+                # Match by search type to find the right tab
+                if search_type and f'/search/results/{search_type}/' in tab_url:
+                    target_tab = tab
+                    break
+                # Fallback: match by base URL
+                elif url.split('?')[0] in tab_url:
                     target_tab = tab
                     break
 
