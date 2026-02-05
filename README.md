@@ -199,6 +199,12 @@ print(limiter.get_stats())
 | `click_conversation(index)` | Click conversation (1-based) |
 | `click_element(selector)` | Click element by CSS selector |
 | `type_text(text)` | Type text human-like |
+| `get_current_conversation()` | Get name of current chat partner |
+| `get_conversations_list(limit)` | List visible conversations |
+| `scroll_conversations(direction)` | Scroll conversation list |
+| `find_conversation_by_name(name)` | Search for conversation by name |
+| `read_current_messages()` | Read messages in current thread |
+| `reconnect_to_tab(pattern)` | Reconnect WebSocket after navigation |
 | `close()` | Close connection |
 
 ### LinkedInSearch (linkedin_search.py)
@@ -263,16 +269,21 @@ Built-in delays to mimic human behavior:
 
 ```
 linkedin-cdp/
-├── linkedin_cdp.py       # Core CDP connection & messaging
-├── linkedin_search.py    # People/company search
-├── linkedin_profile.py   # Profile data extraction
-├── linkedin_connect.py   # Connection requests
-├── linkedin_send.py      # Bulk messaging example
-├── rate_limiter.py       # Rate limiting & protection
-├── chrome_debug.sh       # Chrome launcher script
-├── README.md             # This file
-└── LICENSE               # MIT License
+├── linkedin_cdp.py         # Core CDP connection & messaging
+├── linkedin_search.py      # People/company search
+├── linkedin_profile.py     # Profile data extraction
+├── linkedin_connect.py     # Connection requests
+├── linkedin_send.py        # Bulk messaging example
+├── rate_limiter.py         # Rate limiting & protection
+├── chrome_debug.sh         # Chrome launcher script
+├── README.md               # This file
+├── SKILL_LINKEDIN_CDP.md   # Detailed usage guide & best practices
+└── LICENSE                 # MIT License
 ```
+
+## Documentation
+
+For detailed usage guide, best practices, and known limitations, see **[SKILL_LINKEDIN_CDP.md](SKILL_LINKEDIN_CDP.md)**.
 
 ## Troubleshooting
 

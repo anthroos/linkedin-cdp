@@ -2,12 +2,19 @@
 """
 LinkedIn automation via Chrome DevTools Protocol.
 Human-like behavior to avoid detection.
+
+Key learnings from testing:
+- LinkedIn React UI blocks programmatic conversation switching
+- WebSocket reconnection required after Page.navigate
+- URL patterns (/in/, /company/) more reliable than CSS selectors
+- innerText parsing works better than DOM selectors (LinkedIn obfuscates classes)
+- Wait times: 8-12 seconds for full page load
 """
 import json
 import time
 import random
 import requests
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 import websocket
 
 CDP_PORT = 9222
@@ -263,6 +270,165 @@ class LinkedInBot:
         """Close WebSocket connection."""
         if self.ws:
             self.ws.close()
+
+    # =========================================================================
+    # Helper methods added based on testing experience
+    # =========================================================================
+
+    def reconnect_to_tab(self, url_pattern: str = "linkedin.com") -> bool:
+        """
+        Reconnect WebSocket to a tab matching the URL pattern.
+        Required after Page.navigate as it invalidates the connection.
+
+        Args:
+            url_pattern: String to match in tab URL (e.g., "messaging", "/in/", "/company/")
+
+        Returns:
+            True if reconnected successfully
+        """
+        try:
+            resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
+            tabs = resp.json()
+
+            for tab in tabs:
+                tab_url = tab.get("url", "")
+                if url_pattern in tab_url and tab.get("webSocketDebuggerUrl"):
+                    if self.ws:
+                        try:
+                            self.ws.close()
+                        except:
+                            pass
+                    self.ws_url = tab["webSocketDebuggerUrl"]
+                    self.ws = websocket.create_connection(self.ws_url, timeout=30)
+                    self.ws.settimeout(30)
+                    return True
+            return False
+        except Exception as e:
+            print(f"  Warning: reconnect failed: {e}")
+            return False
+
+    def get_current_conversation(self) -> str:
+        """
+        Get the name of the person in currently open conversation.
+
+        Returns:
+            Name of the conversation partner or empty string
+        """
+        name = self._evaluate('''
+            document.querySelector(".msg-entity-lockup__entity-title")?.innerText ||
+            document.querySelector(".msg-overlay-conversation-bubble__title")?.innerText ||
+            ""
+        ''')
+        return name.strip() if name else ""
+
+    def get_conversations_list(self, limit: int = 10) -> List[Dict[str, str]]:
+        """
+        Get list of visible conversations in messaging.
+
+        Args:
+            limit: Maximum conversations to return
+
+        Returns:
+            List of dicts with name, preview, timestamp
+        """
+        result = self._evaluate(f'''
+            (() => {{
+                const items = document.querySelectorAll(".msg-conversations-container__conversations-list li");
+                const convs = [];
+                const limit = {limit};
+
+                items.forEach((item, idx) => {{
+                    if (convs.length >= limit) return;
+
+                    const text = item.innerText;
+                    const lines = text.split("\\n").filter(l => l.trim());
+
+                    if (lines.length >= 2) {{
+                        convs.push({{
+                            index: idx + 1,
+                            name: lines[0].trim(),
+                            timestamp: lines[1]?.trim() || "",
+                            preview: lines[2]?.trim() || ""
+                        }});
+                    }}
+                }});
+
+                return JSON.stringify(convs);
+            }})()
+        ''')
+
+        try:
+            return json.loads(result) if result else []
+        except json.JSONDecodeError:
+            return []
+
+    def scroll_conversations(self, direction: str = "down", pixels: int = 300) -> None:
+        """
+        Scroll the conversation list.
+
+        Args:
+            direction: "down" or "up"
+            pixels: Number of pixels to scroll
+        """
+        scroll_value = pixels if direction == "down" else -pixels
+        self._evaluate(f'''
+            const list = document.querySelector(".msg-conversations-container__conversations-list");
+            if (list) list.scrollBy(0, {scroll_value});
+        ''')
+        self._human_delay(300, 600)
+
+    def find_conversation_by_name(self, name: str, max_scrolls: int = 10) -> bool:
+        """
+        Scroll through conversations to find one by name.
+        Note: Due to LinkedIn React UI limitations, this finds but may not successfully click.
+        User may need to manually click the conversation.
+
+        Args:
+            name: Name to search for (partial match)
+            max_scrolls: Maximum scroll attempts
+
+        Returns:
+            True if conversation was found in list
+        """
+        name_lower = name.lower()
+
+        for i in range(max_scrolls):
+            convs = self.get_conversations_list(limit=20)
+
+            for conv in convs:
+                if name_lower in conv.get("name", "").lower():
+                    print(f"  Found: {conv['name']} at index {conv['index']}")
+                    return True
+
+            self.scroll_conversations("down", 400)
+            time.sleep(0.5)
+
+        return False
+
+    def read_current_messages(self, max_chars: int = 5000) -> str:
+        """
+        Read messages from currently open conversation.
+
+        Args:
+            max_chars: Maximum characters to return
+
+        Returns:
+            Text content of messages
+        """
+        messages = self._evaluate(f'''
+            document.querySelector(".msg-s-message-list-content")?.innerText?.substring(0, {max_chars}) || ""
+        ''')
+        return messages if messages else ""
+
+    def wait_for_user(self, prompt: str = "Press Enter when ready...") -> None:
+        """
+        Wait for user to perform manual action.
+        Useful when LinkedIn UI blocks programmatic interactions.
+
+        Args:
+            prompt: Message to display
+        """
+        input(prompt)
 
 
 def main():
