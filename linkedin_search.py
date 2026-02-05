@@ -2,6 +2,7 @@
 """
 LinkedIn people and company search via CDP.
 """
+import json
 import time
 import random
 import urllib.parse
@@ -20,13 +21,13 @@ class LinkedInSearch(LinkedInBot):
         super().__init__()
         self.limiter = RateLimiter() if use_rate_limiter else None
 
-    def _wait_for_results(self, timeout: int = 10) -> bool:
+    def _wait_for_results(self, timeout: int = 15) -> bool:
         """Wait for search results to load."""
         start = time.time()
         while time.time() - start < timeout:
+            # Check for profile links which indicate results loaded
             result = self._evaluate('''
-                document.querySelectorAll('.reusable-search__result-container').length > 0 ||
-                document.querySelectorAll('.search-results-container').length > 0
+                document.querySelectorAll('a[href*="/in/"]').length > 5
             ''')
             if result:
                 self._human_delay(500, 1000)
@@ -35,16 +36,52 @@ class LinkedInSearch(LinkedInBot):
         return False
 
     def navigate_to(self, url: str) -> bool:
-        """Navigate to a URL."""
+        """Navigate to a URL and reconnect to the tab."""
+        import requests
+        import websocket
+
         result = self._send("Page.navigate", {"url": url})
         if result.get("error"):
             print(f"✗ Navigation failed: {result.get('error')}")
             return False
 
-        # Wait for page load
-        time.sleep(2)
+        # Wait for page load (LinkedIn needs more time to render)
+        time.sleep(8)
+
+        # Reconnect to the tab after navigation
+        try:
+            resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
+            tabs = resp.json()
+
+            # Find the tab with our URL
+            target_tab = None
+            for tab in tabs:
+                if url.split('?')[0] in tab.get("url", ""):
+                    target_tab = tab
+                    break
+
+            if target_tab and target_tab.get("webSocketDebuggerUrl"):
+                if self.ws:
+                    try:
+                        self.ws.close()
+                    except:
+                        pass
+                self.ws_url = target_tab["webSocketDebuggerUrl"]
+                self.ws = websocket.create_connection(self.ws_url, timeout=30)
+                self.ws.settimeout(30)
+        except Exception as e:
+            print(f"  Warning: reconnect failed: {e}")
+
         self._human_delay(1000, 2000)
         return True
+
+    def _scroll_page(self):
+        """Scroll to trigger lazy loading."""
+        try:
+            self._evaluate('window.scrollTo(0, 500)')
+            time.sleep(1)
+        except:
+            pass  # Ignore scroll errors
 
     def search_people(
         self,
@@ -77,34 +114,78 @@ class LinkedInSearch(LinkedInBot):
         if not self.navigate_to(url):
             return []
 
+        # Scroll to trigger lazy loading
+        self._scroll_page()
+
         if not self._wait_for_results():
             print("✗ No search results found")
             return []
 
-        # Extract results
+        # Extract results using profile link-based approach
+        # (LinkedIn uses obfuscated class names, so we find profiles by URL pattern)
         results = self._evaluate('''
             (() => {
+                const seen = new Set();
                 const results = [];
-                const items = document.querySelectorAll('.reusable-search__result-container');
+                const limit = ''' + str(limit) + ''';
 
-                items.forEach((item, index) => {
-                    if (index >= ''' + str(limit) + ''') return;
+                document.querySelectorAll('a[href*="/in/"]').forEach(link => {
+                    if (results.length >= limit) return;
 
-                    const nameEl = item.querySelector('.entity-result__title-text a span[aria-hidden="true"]');
-                    const titleEl = item.querySelector('.entity-result__primary-subtitle');
-                    const locationEl = item.querySelector('.entity-result__secondary-subtitle');
-                    const linkEl = item.querySelector('.entity-result__title-text a');
-                    const imgEl = item.querySelector('.presence-entity__image');
+                    const href = link.href;
+                    const match = href.match(/\\/in\\/([a-zA-Z0-9\\-]+)/);
+                    if (!match) return;
 
-                    if (nameEl) {
-                        results.push({
-                            name: nameEl.innerText.trim(),
-                            title: titleEl ? titleEl.innerText.trim() : '',
-                            location: locationEl ? locationEl.innerText.trim() : '',
-                            profile_url: linkEl ? linkEl.href.split('?')[0] : '',
-                            image_url: imgEl ? imgEl.src : ''
-                        });
+                    const username = match[1];
+                    if (seen.has(username) || username === 'me') return;
+
+                    const text = link.innerText.trim();
+                    if (text.length < 3 || text.length > 100) return;
+                    if (text.includes('View') && text.includes('profile')) return;
+
+                    // Get first line as name (remove connection badges)
+                    const name = text.split('\\n')[0].replace(/•.*/, '').trim();
+                    if (name.length < 2) return;
+
+                    // Get context from parent container
+                    let container = link.parentElement;
+                    for (let i = 0; i < 6 && container; i++) {
+                        container = container.parentElement;
                     }
+
+                    let title = '';
+                    let location = '';
+
+                    if (container) {
+                        const lines = container.innerText.split('\\n')
+                            .map(l => l.trim())
+                            .filter(l => l.length > 3);
+
+                        let foundName = false;
+                        for (const line of lines) {
+                            if (line.includes(name.substring(0, 8))) {
+                                foundName = true;
+                                continue;
+                            }
+                            if (!foundName) continue;
+                            if (line.includes('•') || line === 'Message' || line === 'Connect') continue;
+
+                            if (!title) {
+                                title = line;
+                            } else if (!location && line.length < 80) {
+                                location = line;
+                                break;
+                            }
+                        }
+                    }
+
+                    seen.add(username);
+                    results.push({
+                        name: name,
+                        title: title.substring(0, 100),
+                        location: location.substring(0, 80),
+                        profile_url: 'https://www.linkedin.com/in/' + username
+                    });
                 });
 
                 return JSON.stringify(results);
@@ -115,10 +196,10 @@ class LinkedInSearch(LinkedInBot):
             self.limiter.record_search()
 
         try:
-            people = eval(results) if results else []
+            people = json.loads(results) if results else []
             print(f"✓ Found {len(people)} results")
             return people
-        except:
+        except json.JSONDecodeError:
             return []
 
     def search_companies(
@@ -149,31 +230,68 @@ class LinkedInSearch(LinkedInBot):
         if not self.navigate_to(url):
             return []
 
+        # Scroll to trigger lazy loading
+        self._scroll_page()
+
         if not self._wait_for_results():
             print("✗ No search results found")
             return []
 
+        # Extract company results using link-based approach
         results = self._evaluate('''
             (() => {
+                const seen = new Set();
                 const results = [];
-                const items = document.querySelectorAll('.reusable-search__result-container');
+                const limit = ''' + str(limit) + ''';
 
-                items.forEach((item, index) => {
-                    if (index >= ''' + str(limit) + ''') return;
+                document.querySelectorAll('a[href*="/company/"]').forEach(link => {
+                    if (results.length >= limit) return;
 
-                    const nameEl = item.querySelector('.entity-result__title-text a span[aria-hidden="true"]');
-                    const subtitleEl = item.querySelector('.entity-result__primary-subtitle');
-                    const secondaryEl = item.querySelector('.entity-result__secondary-subtitle');
-                    const linkEl = item.querySelector('.entity-result__title-text a');
+                    const href = link.href;
+                    const match = href.match(/\\/company\\/([a-zA-Z0-9\\-]+)/);
+                    if (!match) return;
 
-                    if (nameEl) {
-                        results.push({
-                            name: nameEl.innerText.trim(),
-                            industry: subtitleEl ? subtitleEl.innerText.trim() : '',
-                            info: secondaryEl ? secondaryEl.innerText.trim() : '',
-                            company_url: linkEl ? linkEl.href.split('?')[0] : ''
-                        });
+                    const companySlug = match[1];
+                    if (seen.has(companySlug)) return;
+
+                    const text = link.innerText.trim();
+                    if (text.length < 2 || text.length > 100) return;
+
+                    const name = text.split('\\n')[0].trim();
+                    if (name.length < 2) return;
+
+                    // Get context from parent
+                    let container = link.parentElement;
+                    for (let i = 0; i < 6 && container; i++) {
+                        container = container.parentElement;
                     }
+
+                    let industry = '';
+                    let info = '';
+
+                    if (container) {
+                        const lines = container.innerText.split('\\n')
+                            .map(l => l.trim())
+                            .filter(l => l.length > 3 && l !== name);
+
+                        for (const line of lines) {
+                            if (line === 'Follow' || line === 'Following') continue;
+                            if (!industry) {
+                                industry = line;
+                            } else if (!info && line.length < 100) {
+                                info = line;
+                                break;
+                            }
+                        }
+                    }
+
+                    seen.add(companySlug);
+                    results.push({
+                        name: name,
+                        industry: industry.substring(0, 80),
+                        info: info.substring(0, 100),
+                        company_url: 'https://www.linkedin.com/company/' + companySlug
+                    });
                 });
 
                 return JSON.stringify(results);
@@ -184,10 +302,10 @@ class LinkedInSearch(LinkedInBot):
             self.limiter.record_search()
 
         try:
-            companies = eval(results) if results else []
+            companies = json.loads(results) if results else []
             print(f"✓ Found {len(companies)} companies")
             return companies
-        except:
+        except json.JSONDecodeError:
             return []
 
     def get_search_suggestions(self, query: str) -> List[str]:
