@@ -1,42 +1,48 @@
 #!/usr/bin/env python3
 """
-LinkedIn automation via Chrome DevTools Protocol.
-Human-like behavior to avoid detection.
+LinkedIn automation via Chrome DevTools Protocol — Input-only approach.
 
-Key learnings from testing:
-- LinkedIn React UI blocks programmatic conversation switching
-- WebSocket reconnection required after Page.navigate
-- URL patterns (/in/, /company/) more reliable than CSS selectors
-- innerText parsing works better than DOM selectors (LinkedIn obfuscates classes)
-- Wait times: 8-12 seconds for full page load
+All interactions use CDP Input domain (mouse, keyboard, scroll).
+All data reading uses Page.captureScreenshot (visual interpretation by caller).
+Zero DOM access (no Runtime.evaluate, no querySelector, no innerText).
+
+Mouse trajectories use cubic Bezier curves with randomized control points,
+easing functions, micro-jitter, overshoot correction, and variable speed
+to ensure every path is unique and human-like.
 """
+import base64
 import json
-import time
+import math
 import random
+import time
+from typing import Optional
+
 import requests
-from typing import Optional, Any, List, Dict
 import websocket
 
 CDP_PORT = 9222
 
 
 class LinkedInBot:
-    """LinkedIn messaging bot using Chrome DevTools Protocol."""
-    
+    """LinkedIn automation via CDP Input domain + screenshots."""
+
     def __init__(self, port: int = CDP_PORT):
         self.port = port
         self.ws: Optional[websocket.WebSocket] = None
         self.ws_url: Optional[str] = None
         self.msg_id = 0
-        
+        # Cursor position tracking (randomized start)
+        self.cur_x = random.randint(400, 700)
+        self.cur_y = random.randint(250, 450)
+
+    # ── CDP core ──────────────────────────────────────────────────
+
     def connect(self) -> bool:
         """Connect to Chrome via CDP."""
         try:
-            # Get available tabs
             resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
             tabs = resp.json()
 
-            # Find LinkedIn tab in priority order
             li_tab = None
 
             # Priority 1: messaging tab
@@ -46,12 +52,11 @@ class LinkedInBot:
                     li_tab = tab
                     break
 
-            # Priority 2: any main LinkedIn page (not iframes/widgets)
+            # Priority 2: any LinkedIn page (skip iframes)
             if not li_tab:
                 for tab in tabs:
                     url = tab.get("url", "")
                     if "linkedin.com" in url:
-                        # Skip internal/iframe pages
                         if any(x in url for x in ['/m/', 'protechts', 'merchantpool', 'licdn', '/lite/']):
                             continue
                         li_tab = tab
@@ -70,7 +75,6 @@ class LinkedInBot:
                 print("✗ No WebSocket URL")
                 return False
 
-            # Connect WebSocket with longer timeout
             self.ws = websocket.create_connection(self.ws_url, timeout=30)
             self.ws.settimeout(30)
             print(f"✓ Connected to: {li_tab.get('title', 'Unknown')[:50]}")
@@ -79,225 +83,47 @@ class LinkedInBot:
         except Exception as e:
             print(f"✗ Connection failed: {e}")
             return False
-    
+
     def _send(self, method: str, params: dict = None) -> dict:
         """Send CDP command and return result."""
         self.msg_id += 1
-        msg = {
-            "id": self.msg_id,
-            "method": method,
-            "params": params or {}
-        }
+        msg = {"id": self.msg_id, "method": method, "params": params or {}}
         self.ws.send(json.dumps(msg))
-        
-        # Wait for response (skip events)
+
         target_id = self.msg_id
         timeout_count = 0
-        while timeout_count < 50:  # Max 50 attempts
+        while timeout_count < 50:
             try:
                 resp = json.loads(self.ws.recv())
                 if resp.get("id") == target_id:
                     return resp
-                # Skip events (no id field)
             except websocket.WebSocketTimeoutException:
                 timeout_count += 1
                 time.sleep(0.1)
-        
+
         return {"error": "timeout"}
-    
-    def _human_delay(self, min_ms: int = 100, max_ms: int = 400):
-        """Random delay like a human."""
-        time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
-    
-    def _evaluate(self, expression: str) -> Any:
-        """Execute JavaScript and return result."""
-        result = self._send("Runtime.evaluate", {
-            "expression": expression,
-            "returnByValue": True
-        })
-        return result.get("result", {}).get("result", {}).get("value")
-    
-    def find_element(self, selector: str) -> Optional[dict]:
-        """Find element by CSS selector, return its nodeId."""
-        # Get document root
-        doc = self._send("DOM.getDocument")
-        root_id = doc.get("result", {}).get("root", {}).get("nodeId")
-        
-        if not root_id:
-            return None
-        
-        # Query selector
-        result = self._send("DOM.querySelector", {
-            "nodeId": root_id,
-            "selector": selector
-        })
-        
-        node_id = result.get("result", {}).get("nodeId")
-        if node_id and node_id != 0:
-            return {"nodeId": node_id}
-        return None
-    
-    def get_element_box(self, node_id: int) -> Optional[dict]:
-        """Get element bounding box for clicking."""
-        result = self._send("DOM.getBoxModel", {"nodeId": node_id})
-        content = result.get("result", {}).get("model", {}).get("content")
-        
-        if content and len(content) >= 4:
-            # content is [x1,y1, x2,y1, x2,y2, x1,y2]
-            x = (content[0] + content[2]) / 2
-            y = (content[1] + content[5]) / 2
-            return {"x": x, "y": y}
-        return None
-    
-    def click_element(self, selector: str, timeout: int = 5) -> bool:
-        """Click element by selector with human-like behavior."""
-        start = time.time()
-        
-        while time.time() - start < timeout:
-            elem = self.find_element(selector)
-            if elem:
-                box = self.get_element_box(elem["nodeId"])
-                if box:
-                    x, y = box["x"], box["y"]
-                    
-                    # Human: move mouse first
-                    self._send("Input.dispatchMouseEvent", {
-                        "type": "mouseMoved",
-                        "x": x + random.randint(-5, 5),
-                        "y": y + random.randint(-5, 5)
-                    })
-                    self._human_delay(50, 150)
-                    
-                    # Click down
-                    self._send("Input.dispatchMouseEvent", {
-                        "type": "mousePressed",
-                        "x": x,
-                        "y": y,
-                        "button": "left",
-                        "clickCount": 1
-                    })
-                    self._human_delay(30, 80)
-                    
-                    # Click up
-                    self._send("Input.dispatchMouseEvent", {
-                        "type": "mouseReleased",
-                        "x": x,
-                        "y": y,
-                        "button": "left",
-                        "clickCount": 1
-                    })
-                    
-                    self._human_delay(100, 300)
-                    return True
-            
-            time.sleep(0.3)
-        
-        print(f"✗ Element not found: {selector}")
-        return False
-    
-    def type_text(self, text: str, human_like: bool = True):
-        """Type text character by character like a human."""
-        for i, char in enumerate(text):
-            self._send("Input.insertText", {"text": char})
-            
-            if human_like:
-                # Human typing speed: ~40-60 WPM = 200-300ms per char average
-                if char in " ":
-                    self._human_delay(150, 350)  # Longer pause at spaces
-                elif char in ".,!?":
-                    self._human_delay(200, 450)  # Thinking pause at punctuation
-                elif char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                    self._human_delay(120, 280)  # Shift key takes time
-                else:
-                    self._human_delay(80, 200)  # Normal typing
-                
-                # Occasional longer pause (thinking)
-                if i > 0 and i % random.randint(8, 15) == 0:
-                    self._human_delay(300, 600)
-    
-    def focus_message_input(self) -> bool:
-        """Focus the LinkedIn message input field."""
-        selectors = [
-            'div.msg-form__contenteditable[contenteditable="true"]',
-            'div[role="textbox"][contenteditable="true"]',
-            'div[data-placeholder="Write a message…"]',
-            '.msg-form__contenteditable',
-        ]
-        
-        for selector in selectors:
-            if self.click_element(selector, timeout=2):
-                self._human_delay(200, 400)
-                return True
-        
-        return False
-    
-    def send_message(self, text: str) -> bool:
-        """Send a message in the currently open conversation."""
-        print(f"  Focusing input...")
-        if not self.focus_message_input():
-            print("✗ Could not focus message input")
-            return False
-        
-        # Pause before typing like a human reading the conversation
-        self._human_delay(800, 1500)
-        
-        print(f"  Typing message...")
-        self.type_text(text)
-        
-        # Pause after typing to "review" the message
-        self._human_delay(600, 1200)
-        
-        # Click Send button (more reliable than Enter)
-        print(f"  Sending...")
-        send_selectors = [
-            'button.msg-form__send-button',
-            'button[type="submit"]',
-        ]
-        for sel in send_selectors:
-            if self.click_element(sel, timeout=2):
-                break
-        
-        self._human_delay(500, 1000)
-        print("✓ Message sent")
-        return True
-    
-    def click_conversation(self, index: int) -> bool:
-        """Click on conversation by index (1-based)."""
-        selector = f'.msg-conversations-container__conversations-list > li:nth-child({index})'
-        return self.click_element(selector)
-    
+
     def close(self):
         """Close WebSocket connection."""
         if self.ws:
             self.ws.close()
-
-    # =========================================================================
-    # Helper methods added based on testing experience
-    # =========================================================================
+            self.ws = None
 
     def reconnect_to_tab(self, url_pattern: str = "linkedin.com") -> bool:
-        """
-        Reconnect WebSocket to a tab matching the URL pattern.
-        Required after Page.navigate as it invalidates the connection.
-
-        Args:
-            url_pattern: String to match in tab URL (e.g., "messaging", "/in/", "/company/")
-
-        Returns:
-            True if reconnected successfully
-        """
+        """Reconnect WebSocket to a tab matching URL pattern."""
         try:
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception:
+                    pass
+            time.sleep(1)
             resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
             tabs = resp.json()
 
             for tab in tabs:
                 tab_url = tab.get("url", "")
                 if url_pattern in tab_url and tab.get("webSocketDebuggerUrl"):
-                    if self.ws:
-                        try:
-                            self.ws.close()
-                        except:
-                            pass
                     self.ws_url = tab["webSocketDebuggerUrl"]
                     self.ws = websocket.create_connection(self.ws_url, timeout=30)
                     self.ws.settimeout(30)
@@ -307,144 +133,278 @@ class LinkedInBot:
             print(f"  Warning: reconnect failed: {e}")
             return False
 
-    def get_current_conversation(self) -> str:
+    # ── Human-like mouse ──────────────────────────────────────────
+
+    @staticmethod
+    def _bezier(p0, p1, p2, p3, t):
+        """Cubic Bezier interpolation at parameter t."""
+        x = ((1 - t) ** 3 * p0[0]
+             + 3 * (1 - t) ** 2 * t * p1[0]
+             + 3 * (1 - t) * t ** 2 * p2[0]
+             + t ** 3 * p3[0])
+        y = ((1 - t) ** 3 * p0[1]
+             + 3 * (1 - t) ** 2 * t * p1[1]
+             + 3 * (1 - t) * t ** 2 * p2[1]
+             + t ** 3 * p3[1])
+        return (x, y)
+
+    def _human_path(self, sx, sy, ex, ey):
+        """Generate unique mouse path with random Bezier curve + micro-jitter.
+
+        Every call produces a different trajectory via:
+        - Random control point positions (r1, r2)
+        - Random jitter magnitude (jx, jy)
+        - Random easing function selection
+        - Gaussian hand tremor per step
+        - Variable step count
+        - Occasional overshoot correction (12%)
+        - Occasional micro-pause (15%)
         """
-        Get the name of the person in currently open conversation.
+        dx, dy = ex - sx, ey - sy
+        dist = math.sqrt(dx ** 2 + dy ** 2)
 
-        Returns:
-            Name of the conversation partner or empty string
-        """
-        name = self._evaluate('''
-            document.querySelector(".msg-entity-lockup__entity-title")?.innerText ||
-            document.querySelector(".msg-overlay-conversation-bubble__title")?.innerText ||
-            ""
-        ''')
-        return name.strip() if name else ""
+        # Random control points (unique every call)
+        r1 = random.uniform(0.15, 0.45)
+        r2 = random.uniform(0.55, 0.85)
+        jx = random.uniform(-max(30, abs(dx) * 0.35), max(30, abs(dx) * 0.35))
+        jy = random.uniform(-max(20, abs(dy) * 0.2), max(20, abs(dy) * 0.2))
+        cp1 = (sx + dx * r1 + jx, sy + dy * r1 + jy * 0.6)
+        cp2 = (sx + dx * r2 - jx * 0.5, sy + dy * r2 - jy * 0.4)
 
-    def get_conversations_list(self, limit: int = 10) -> List[Dict[str, str]]:
-        """
-        Get list of visible conversations in messaging.
+        steps = max(10, min(45, int(dist / 12) + random.randint(-4, 6)))
 
-        Args:
-            limit: Maximum conversations to return
+        # Random easing function
+        easing = random.choice(['hermite', 'ease_in', 'ease_out', 'linear'])
 
-        Returns:
-            List of dicts with name, preview, timestamp
-        """
-        result = self._evaluate(f'''
-            (() => {{
-                const items = document.querySelectorAll(".msg-conversations-container__conversations-list li");
-                const convs = [];
-                const limit = {limit};
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
 
-                items.forEach((item, idx) => {{
-                    if (convs.length >= limit) return;
+            # Apply selected easing
+            if easing == 'hermite':
+                t = t * t * (3 - 2 * t)
+            elif easing == 'ease_in':
+                t = t * t
+            elif easing == 'ease_out':
+                t = 1 - (1 - t) * (1 - t)
+            # linear: t unchanged
 
-                    const text = item.innerText;
-                    const lines = text.split("\\n").filter(l => l.trim());
+            px, py = self._bezier((sx, sy), cp1, cp2, (ex, ey), t)
+            px += random.gauss(0, 0.7)  # hand tremor
+            py += random.gauss(0, 0.7)
+            pts.append((int(px), int(py)))
 
-                    if (lines.length >= 2) {{
-                        convs.push({{
-                            index: idx + 1,
-                            name: lines[0].trim(),
-                            timestamp: lines[1]?.trim() || "",
-                            preview: lines[2]?.trim() || ""
-                        }});
-                    }}
-                }});
+        # Overshoot correction (12% chance)
+        if random.random() < 0.12 and dist > 50:
+            overshoot = random.uniform(5, 20)
+            angle = math.atan2(dy, dx)
+            ox = int(ex + overshoot * math.cos(angle))
+            oy = int(ey + overshoot * math.sin(angle))
+            pts.append((ox, oy))
+            # Correct back
+            correction = self._bezier((ox, oy), (ox, oy), (ex, ey), (ex, ey), 1.0)
+            pts.append((int(correction[0]), int(correction[1])))
 
-                return JSON.stringify(convs);
-            }})()
-        ''')
+        return pts
 
-        try:
-            return json.loads(result) if result else []
-        except json.JSONDecodeError:
-            return []
+    def _move_to(self, x, y):
+        """Move mouse to target with human-like trajectory."""
+        tx = x + random.randint(-3, 3)
+        ty = y + random.randint(-3, 3)
+        path = self._human_path(self.cur_x, self.cur_y, tx, ty)
 
-    def scroll_conversations(self, direction: str = "down", pixels: int = 300) -> None:
-        """
-        Scroll the conversation list.
+        # Determine if we'll have a micro-pause (15% chance)
+        pause_at = -1
+        if random.random() < 0.15 and len(path) > 6:
+            pause_at = random.randint(len(path) // 3, 2 * len(path) // 3)
 
-        Args:
-            direction: "down" or "up"
-            pixels: Number of pixels to scroll
-        """
-        scroll_value = pixels if direction == "down" else -pixels
-        self._evaluate(f'''
-            const list = document.querySelector(".msg-conversations-container__conversations-list");
-            if (list) list.scrollBy(0, {scroll_value});
-        ''')
-        self._human_delay(300, 600)
+        for i, (px, py) in enumerate(path):
+            self._send("Input.dispatchMouseEvent", {
+                "type": "mouseMoved", "x": px, "y": py, "button": "none",
+            })
+            # Variable speed per segment
+            base_delay = random.uniform(0.004, 0.022)
+            if i == pause_at:
+                time.sleep(random.uniform(0.05, 0.15))  # micro-pause
+            else:
+                time.sleep(base_delay)
 
-    def find_conversation_by_name(self, name: str, max_scrolls: int = 10) -> bool:
-        """
-        Scroll through conversations to find one by name.
-        Note: Due to LinkedIn React UI limitations, this finds but may not successfully click.
-        User may need to manually click the conversation.
+        self.cur_x, self.cur_y = path[-1]
 
-        Args:
-            name: Name to search for (partial match)
-            max_scrolls: Maximum scroll attempts
+    def _click(self, x, y):
+        """Move to element and click with realistic timing."""
+        self._move_to(x, y)
+        time.sleep(random.uniform(0.08, 0.25))
+        self._send("Input.dispatchMouseEvent", {
+            "type": "mousePressed",
+            "x": self.cur_x, "y": self.cur_y,
+            "button": "left", "clickCount": 1,
+        })
+        time.sleep(random.uniform(0.04, 0.12))
+        self._send("Input.dispatchMouseEvent", {
+            "type": "mouseReleased",
+            "x": self.cur_x, "y": self.cur_y,
+            "button": "left", "clickCount": 1,
+        })
 
-        Returns:
-            True if conversation was found in list
-        """
-        name_lower = name.lower()
+    def _maybe_fake_hover(self, target_y):
+        """30% chance to hover over a nearby element first (human behavior)."""
+        if random.random() < 0.3:
+            fake_y = target_y + random.choice([-80, 80, -160])
+            self._move_to(self.cur_x, max(50, fake_y))
+            time.sleep(random.uniform(0.1, 0.3))
 
-        for i in range(max_scrolls):
-            convs = self.get_conversations_list(limit=20)
+    def _human_delay(self, min_ms: int = 100, max_ms: int = 400):
+        """Random delay like a human."""
+        time.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
-            for conv in convs:
-                if name_lower in conv.get("name", "").lower():
-                    print(f"  Found: {conv['name']} at index {conv['index']}")
-                    return True
+    # ── Keyboard ──────────────────────────────────────────────────
 
-            self.scroll_conversations("down", 400)
-            time.sleep(0.5)
+    def type_text(self, text: str, human_like: bool = True):
+        """Type text character by character like a human."""
+        for i, char in enumerate(text):
+            self._send("Input.insertText", {"text": char})
 
+            if human_like:
+                if char in " ":
+                    self._human_delay(150, 350)
+                elif char in ".,!?":
+                    self._human_delay(200, 450)
+                elif char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                    self._human_delay(120, 280)
+                else:
+                    self._human_delay(80, 200)
+
+                # Occasional thinking pause
+                if i > 0 and i % random.randint(8, 15) == 0:
+                    self._human_delay(300, 600)
+
+    def press_key(self, key: str, modifiers: int = 0):
+        """Press a keyboard key (Enter, Tab, Escape, etc.)."""
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyDown",
+            "key": key,
+            "modifiers": modifiers,
+        })
+        self._human_delay(30, 80)
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyUp",
+            "key": key,
+            "modifiers": modifiers,
+        })
+
+    # ── Scroll ────────────────────────────────────────────────────
+
+    def scroll_wheel(self, delta_y: int = 300, delta_x: int = 0,
+                     x: int = None, y: int = None):
+        """Scroll via mouse wheel input. Positive delta_y = scroll down."""
+        x = x if x is not None else self.cur_x
+        y = y if y is not None else self.cur_y
+        # Add slight randomness to scroll amount
+        actual_dy = delta_y + random.randint(-20, 20)
+        self._send("Input.dispatchMouseEvent", {
+            "type": "mouseWheel",
+            "x": x, "y": y,
+            "deltaX": delta_x, "deltaY": actual_dy,
+        })
+        self._human_delay(200, 500)
+
+    # ── Screenshot ────────────────────────────────────────────────
+
+    def take_screenshot(self) -> str:
+        """Capture viewport screenshot. Returns base64-encoded PNG."""
+        result = self._send("Page.captureScreenshot", {"format": "png"})
+        return result.get("result", {}).get("data", "")
+
+    def save_screenshot(self, path: str) -> bool:
+        """Take screenshot and save to file. Returns True on success."""
+        data = self.take_screenshot()
+        if data:
+            with open(path, 'wb') as f:
+                f.write(base64.b64decode(data))
+            return True
         return False
 
-    def read_current_messages(self, max_chars: int = 5000) -> str:
-        """
-        Read messages from currently open conversation.
+    # ── Navigation ────────────────────────────────────────────────
+
+    def navigate_to(self, url: str, wait_seconds: int = 8,
+                    reconnect_pattern: str = None) -> bool:
+        """Navigate to URL, wait for load, reconnect WebSocket.
 
         Args:
-            max_chars: Maximum characters to return
+            url: Target URL
+            wait_seconds: Seconds to wait for page load
+            reconnect_pattern: URL pattern for reconnection (auto-detected if None)
+        """
+        result = self._send("Page.navigate", {"url": url})
+        if result.get("error"):
+            print(f"✗ Navigation failed: {result.get('error')}")
+            return False
+
+        time.sleep(wait_seconds)
+
+        # Auto-detect reconnect pattern from URL
+        if reconnect_pattern is None:
+            if "/in/" in url:
+                reconnect_pattern = "/in/"
+            elif "/company/" in url:
+                reconnect_pattern = "/company/"
+            elif "/messaging" in url:
+                reconnect_pattern = "messaging"
+            elif "/search" in url:
+                reconnect_pattern = "/search"
+            elif "/mynetwork" in url:
+                reconnect_pattern = "mynetwork"
+            else:
+                reconnect_pattern = "linkedin.com"
+
+        return self.reconnect_to_tab(reconnect_pattern)
+
+    def wait_for_page(self, seconds: float = 3.0) -> str:
+        """Wait for page to stabilize, return screenshot."""
+        time.sleep(seconds)
+        return self.take_screenshot()
+
+    # ── Convenience ───────────────────────────────────────────────
+
+    def click_at(self, x: int, y: int, wait: float = 1.5) -> str:
+        """Click at coordinates and return screenshot of result.
+
+        Args:
+            x, y: Click coordinates
+            wait: Seconds to wait after click before screenshot
 
         Returns:
-            Text content of messages
+            base64 PNG screenshot
         """
-        messages = self._evaluate(f'''
-            document.querySelector(".msg-s-message-list-content")?.innerText?.substring(0, {max_chars}) || ""
-        ''')
-        return messages if messages else ""
+        self._click(x, y)
+        self._human_delay(int(wait * 800), int(wait * 1200))
+        return self.take_screenshot()
 
-    def wait_for_user(self, prompt: str = "Press Enter when ready...") -> None:
-        """
-        Wait for user to perform manual action.
-        Useful when LinkedIn UI blocks programmatic interactions.
+    def type_and_screenshot(self, text: str, wait: float = 1.0) -> str:
+        """Type text and return screenshot.
 
         Args:
-            prompt: Message to display
+            text: Text to type
+            wait: Seconds to wait after typing
+
+        Returns:
+            base64 PNG screenshot
         """
-        input(prompt)
+        self.type_text(text)
+        self._human_delay(int(wait * 800), int(wait * 1200))
+        return self.take_screenshot()
 
+    def scroll_and_screenshot(self, delta_y: int = 600, wait: float = 2.0) -> str:
+        """Scroll and return screenshot.
 
-def main():
-    """Test the bot."""
-    bot = LinkedInBot()
-    
-    if not bot.connect():
-        print("Failed to connect to Chrome")
-        return
-    
-    # Test: send message in current conversation
-    print("\nSending test message...")
-    bot.send_message("Test message from CDP bot")
-    
-    bot.close()
+        Args:
+            delta_y: Scroll amount (positive = down)
+            wait: Seconds to wait after scroll
 
-
-if __name__ == "__main__":
-    main()
+        Returns:
+            base64 PNG screenshot
+        """
+        self.scroll_wheel(delta_y=delta_y)
+        time.sleep(wait)
+        return self.take_screenshot()
