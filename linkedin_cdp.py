@@ -11,8 +11,10 @@ easing functions, micro-jitter, overshoot correction, and variable speed
 to ensure every path is unique and human-like.
 """
 import base64
+import glob as globmod
 import json
 import math
+import os
 import random
 import time
 from typing import Optional
@@ -34,6 +36,10 @@ class LinkedInBot:
         # Cursor position tracking (randomized start)
         self.cur_x = random.randint(400, 700)
         self.cur_y = random.randint(250, 450)
+        # Screenshot file management
+        self._screenshot_dir = "/tmp/li_screenshots"
+        self._screenshot_count = 0
+        self._screenshot_max_keep = 50
 
     # ── CDP core ──────────────────────────────────────────────────
 
@@ -77,6 +83,7 @@ class LinkedInBot:
 
             self.ws = websocket.create_connection(self.ws_url, timeout=30)
             self.ws.settimeout(30)
+            os.makedirs(self._screenshot_dir, exist_ok=True)
             print(f"✓ Connected to: {li_tab.get('title', 'Unknown')[:50]}")
             return True
 
@@ -312,13 +319,48 @@ class LinkedInBot:
     # ── Screenshot ────────────────────────────────────────────────
 
     def take_screenshot(self) -> str:
-        """Capture viewport screenshot. Returns base64-encoded PNG."""
+        """Capture viewport screenshot as JPEG, save to file, return path.
+
+        Returns:
+            File path (e.g. '/tmp/li_screenshots/shot_0001.jpg') or "" on failure.
+        """
+        result = self._send("Page.captureScreenshot", {
+            "format": "jpeg", "quality": 80
+        })
+        data = result.get("result", {}).get("data", "")
+        if not data:
+            return ""
+        self._screenshot_count += 1
+        path = os.path.join(
+            self._screenshot_dir,
+            f"shot_{self._screenshot_count:04d}.jpg"
+        )
+        with open(path, 'wb') as f:
+            f.write(base64.b64decode(data))
+        self._cleanup_old_screenshots()
+        return path
+
+    def take_screenshot_base64(self) -> str:
+        """Capture viewport screenshot as base64 PNG (legacy/backward compat)."""
         result = self._send("Page.captureScreenshot", {"format": "png"})
         return result.get("result", {}).get("data", "")
 
+    def _cleanup_old_screenshots(self):
+        """Keep only the last N screenshots in the screenshot directory."""
+        files = sorted(globmod.glob(os.path.join(self._screenshot_dir, "shot_*.jpg")))
+        if len(files) > self._screenshot_max_keep:
+            for f in files[:-self._screenshot_max_keep]:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
     def save_screenshot(self, path: str) -> bool:
-        """Take screenshot and save to file. Returns True on success."""
-        data = self.take_screenshot()
+        """Take screenshot and save to specific path. Returns True on success."""
+        result = self._send("Page.captureScreenshot", {
+            "format": "jpeg", "quality": 80
+        })
+        data = result.get("result", {}).get("data", "")
         if data:
             with open(path, 'wb') as f:
                 f.write(base64.b64decode(data))
@@ -361,49 +403,49 @@ class LinkedInBot:
         return self.reconnect_to_tab(reconnect_pattern)
 
     def wait_for_page(self, seconds: float = 3.0) -> str:
-        """Wait for page to stabilize, return screenshot."""
+        """Wait for page to stabilize, return screenshot file path."""
         time.sleep(seconds)
         return self.take_screenshot()
 
     # ── Convenience ───────────────────────────────────────────────
 
     def click_at(self, x: int, y: int, wait: float = 1.5) -> str:
-        """Click at coordinates and return screenshot of result.
+        """Click at coordinates and return screenshot file path.
 
         Args:
             x, y: Click coordinates
             wait: Seconds to wait after click before screenshot
 
         Returns:
-            base64 PNG screenshot
+            Screenshot file path
         """
         self._click(x, y)
         self._human_delay(int(wait * 800), int(wait * 1200))
         return self.take_screenshot()
 
     def type_and_screenshot(self, text: str, wait: float = 1.0) -> str:
-        """Type text and return screenshot.
+        """Type text and return screenshot file path.
 
         Args:
             text: Text to type
             wait: Seconds to wait after typing
 
         Returns:
-            base64 PNG screenshot
+            Screenshot file path
         """
         self.type_text(text)
         self._human_delay(int(wait * 800), int(wait * 1200))
         return self.take_screenshot()
 
     def scroll_and_screenshot(self, delta_y: int = 600, wait: float = 2.0) -> str:
-        """Scroll and return screenshot.
+        """Scroll and return screenshot file path.
 
         Args:
             delta_y: Scroll amount (positive = down)
             wait: Seconds to wait after scroll
 
         Returns:
-            base64 PNG screenshot
+            Screenshot file path
         """
         self.scroll_wheel(delta_y=delta_y)
         time.sleep(wait)
