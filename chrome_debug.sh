@@ -1,6 +1,11 @@
 #!/bin/bash
-# Launch Google Chrome with remote debugging enabled
+# Launch Google Chrome with remote debugging enabled.
 # Usage: ./chrome_debug.sh
+#
+# SECURITY WARNING: Chrome debug mode exposes a WebSocket debugging port.
+# Only use this on trusted networks. The debug port allows full control of
+# the browser, including reading cookies, navigating pages, and executing
+# JavaScript. Never expose this port to untrusted networks or the internet.
 
 PORT=9222
 
@@ -25,7 +30,7 @@ fi
 echo "Starting Chrome with remote debugging on port $PORT..."
 open -a 'Google Chrome' --args \
     --remote-debugging-port=$PORT \
-    --remote-allow-origins=\* \
+    --remote-allow-origins=http://localhost,http://127.0.0.1 \
     --user-data-dir="$HOME/chrome-debug-profile"
 
 # Wait for Chrome to start

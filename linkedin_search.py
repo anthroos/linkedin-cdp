@@ -16,6 +16,7 @@ Usage:
 """
 import random
 import time
+from urllib.parse import quote
 
 from linkedin_cdp import LinkedInBot
 from rate_limiter import RateLimiter
@@ -47,7 +48,7 @@ class LinkedInSearch(LinkedInBot):
                 return []
             self.limiter.wait_if_needed('searches')
 
-        url = SEARCH_URL.format(query=query.replace(" ", "%20"))
+        url = SEARCH_URL.format(query=quote(query))
         print(f"🔍 Searching: {query}")
 
         self.navigate_to(url, wait_seconds=10, reconnect_pattern="/search")
@@ -90,7 +91,7 @@ class LinkedInSearch(LinkedInBot):
                 return []
             self.limiter.wait_if_needed('searches')
 
-        url = COMPANY_SEARCH_URL.format(query=query.replace(" ", "%20"))
+        url = COMPANY_SEARCH_URL.format(query=quote(query))
         print(f"🔍 Searching companies: {query}")
 
         self.navigate_to(url, wait_seconds=10, reconnect_pattern="/search")
