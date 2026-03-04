@@ -12,12 +12,15 @@ to ensure every path is unique and human-like.
 """
 import base64
 import glob as globmod
+import ipaddress
 import json
 import math
 import os
 import random
+import threading
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 import websocket
@@ -28,11 +31,21 @@ CDP_PORT = 9222
 class LinkedInBot:
     """LinkedIn automation via CDP Input domain + screenshots."""
 
+    # Allowed URL prefixes for navigation
+    _ALLOWED_URL_PREFIXES = (
+        "https://www.linkedin.com/",
+        "https://linkedin.com/",
+    )
+
+    # Blocked URL schemes
+    _BLOCKED_SCHEMES = ("file", "javascript", "chrome", "data", "ftp", "gopher")
+
     def __init__(self, port: int = CDP_PORT):
         self.port = port
         self.ws: Optional[websocket.WebSocket] = None
         self.ws_url: Optional[str] = None
         self.msg_id = 0
+        self._msg_lock = threading.Lock()
         # Cursor position tracking (randomized start)
         self.cur_x = random.randint(400, 700)
         self.cur_y = random.randint(250, 450)
@@ -40,6 +53,70 @@ class LinkedInBot:
         self._screenshot_dir = "/tmp/li_screenshots"
         self._screenshot_count = 0
         self._screenshot_max_keep = 50
+
+    # ── Security helpers ────────────────────────────────────────────
+
+    @classmethod
+    def _is_safe_url(cls, url: str) -> bool:
+        """Validate that a URL is safe to navigate to.
+
+        Only allows https://www.linkedin.com/ and https://linkedin.com/ URLs.
+        Blocks file://, javascript:, chrome://, data:, internal IPs, and localhost.
+
+        Returns:
+            True if the URL is safe; False otherwise.
+        """
+        parsed = urlparse(url)
+
+        # Block dangerous schemes
+        if parsed.scheme.lower() in cls._BLOCKED_SCHEMES:
+            return False
+
+        # Must be https
+        if parsed.scheme.lower() != "https":
+            return False
+
+        # Must start with allowed prefix
+        if not any(url.startswith(prefix) for prefix in cls._ALLOWED_URL_PREFIXES):
+            return False
+
+        # Block internal/private IPs in hostname
+        hostname = parsed.hostname or ""
+        if hostname in ("localhost",):
+            return False
+
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                return False
+        except ValueError:
+            # Not an IP address literal -- that's fine
+            pass
+
+        return True
+
+    @staticmethod
+    def _is_safe_path(path: str, safe_dir: str = None) -> bool:
+        """Validate that a file path is safe for writing.
+
+        Resolves the path and checks it is within the allowed directory.
+        Blocks paths containing '..'.
+
+        Args:
+            path: File path to validate.
+            safe_dir: Allowed base directory. Defaults to /tmp/li_screenshots.
+
+        Returns:
+            True if the path is safe; False otherwise.
+        """
+        if ".." in path:
+            return False
+
+        resolved = os.path.realpath(path)
+        safe_dir = safe_dir or "/tmp/li_screenshots"
+        safe_dir = os.path.realpath(safe_dir)
+
+        return resolved.startswith(safe_dir + os.sep) or resolved == safe_dir
 
     # ── CDP core ──────────────────────────────────────────────────
 
@@ -87,21 +164,35 @@ class LinkedInBot:
             print(f"✓ Connected to: {li_tab.get('title', 'Unknown')[:50]}")
             return True
 
-        except Exception as e:
-            print(f"✗ Connection failed: {e}")
+        except requests.RequestException as e:
+            print(f"✗ Connection failed (HTTP): {e}")
+            return False
+        except websocket.WebSocketException as e:
+            print(f"✗ Connection failed (WebSocket): {e}")
+            return False
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            print(f"✗ Connection failed (parsing): {e}")
             return False
 
     def _send(self, method: str, params: dict = None) -> dict:
         """Send CDP command and return result."""
-        self.msg_id += 1
-        msg = {"id": self.msg_id, "method": method, "params": params or {}}
+        with self._msg_lock:
+            self.msg_id += 1
+            target_id = self.msg_id
+
+        msg = {"id": target_id, "method": method, "params": params or {}}
         self.ws.send(json.dumps(msg))
 
-        target_id = self.msg_id
         timeout_count = 0
         while timeout_count < 50:
             try:
-                resp = json.loads(self.ws.recv())
+                raw = self.ws.recv()
+                try:
+                    resp = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Non-JSON response from CDP; skip and retry
+                    timeout_count += 1
+                    continue
                 if resp.get("id") == target_id:
                     return resp
             except websocket.WebSocketTimeoutException:
@@ -122,7 +213,7 @@ class LinkedInBot:
             if self.ws:
                 try:
                     self.ws.close()
-                except Exception:
+                except websocket.WebSocketException:
                     pass
             time.sleep(1)
             resp = requests.get(f"http://localhost:{self.port}/json", timeout=5)
@@ -136,8 +227,14 @@ class LinkedInBot:
                     self.ws.settimeout(30)
                     return True
             return False
-        except Exception as e:
-            print(f"  Warning: reconnect failed: {e}")
+        except requests.RequestException as e:
+            print(f"  Warning: reconnect failed (HTTP): {e}")
+            return False
+        except websocket.WebSocketException as e:
+            print(f"  Warning: reconnect failed (WebSocket): {e}")
+            return False
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"  Warning: reconnect failed (parsing): {e}")
             return False
 
     # ── Human-like mouse ──────────────────────────────────────────
@@ -355,8 +452,22 @@ class LinkedInBot:
                 except OSError:
                     pass
 
-    def save_screenshot(self, path: str) -> bool:
-        """Take screenshot and save to specific path. Returns True on success."""
+    def save_screenshot(self, path: str, safe_dir: str = None) -> bool:
+        """Take screenshot and save to specific path. Returns True on success.
+
+        Args:
+            path: File path for saving the screenshot.
+            safe_dir: Allowed base directory (defaults to /tmp/li_screenshots).
+
+        Raises:
+            ValueError: If path contains traversal or is outside safe_dir.
+        """
+        if not self._is_safe_path(path, safe_dir):
+            raise ValueError(
+                f"Unsafe screenshot path: '{path}'. "
+                "Path must be within the allowed directory and must not contain '..'."
+            )
+
         result = self._send("Page.captureScreenshot", {
             "format": "jpeg", "quality": 80
         })
@@ -374,10 +485,19 @@ class LinkedInBot:
         """Navigate to URL, wait for load, reconnect WebSocket.
 
         Args:
-            url: Target URL
+            url: Target URL (must be https://www.linkedin.com/ or https://linkedin.com/)
             wait_seconds: Seconds to wait for page load
             reconnect_pattern: URL pattern for reconnection (auto-detected if None)
+
+        Raises:
+            ValueError: If the URL is not a safe LinkedIn URL.
         """
+        if not self._is_safe_url(url):
+            raise ValueError(
+                f"Unsafe URL: '{url}'. "
+                "Only https://www.linkedin.com/ and https://linkedin.com/ URLs are allowed."
+            )
+
         result = self._send("Page.navigate", {"url": url})
         if result.get("error"):
             print(f"✗ Navigation failed: {result.get('error')}")

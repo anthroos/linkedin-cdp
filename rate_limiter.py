@@ -3,8 +3,10 @@
 Rate limiter for LinkedIn automation.
 Prevents account restrictions by enforcing daily limits and delays.
 """
+import fcntl
 import json
 import os
+import random
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -54,11 +56,15 @@ class RateLimiter:
         self.state = self._load_state()
 
     def _load_state(self) -> Dict[str, Any]:
-        """Load state from disk or create new."""
+        """Load state from disk or create new. Uses file locking to prevent races."""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
-                    state = json.load(f)
+                    fcntl.flock(f, fcntl.LOCK_SH)
+                    try:
+                        state = json.load(f)
+                    finally:
+                        fcntl.flock(f, fcntl.LOCK_UN)
                     # Check if state is from today
                     if state.get('date') == datetime.now().strftime('%Y-%m-%d'):
                         return state
@@ -89,10 +95,15 @@ class RateLimiter:
         }
 
     def _save_state(self):
-        """Persist state to disk."""
+        """Persist state to disk. Uses file locking to prevent races."""
         try:
             with open(self.state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    json.dump(self.state, f, indent=2, default=str)
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            os.chmod(self.state_file, 0o600)
         except IOError as e:
             print(f"Warning: Could not save rate limiter state: {e}")
 
@@ -121,7 +132,6 @@ class RateLimiter:
             return 0
         elif elapsed >= min_delay:
             # Random delay within remaining window
-            import random
             return random.uniform(0, max_delay - elapsed)
         else:
             # Must wait at least min_delay
