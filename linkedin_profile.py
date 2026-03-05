@@ -14,6 +14,7 @@ Usage:
     # caller reads screenshots visually to extract name, title, experience, etc.
     prof.close()
 """
+import re
 import random
 import time
 
@@ -28,14 +29,47 @@ class LinkedInProfile(LinkedInBot):
         super().__init__(port=port)
         self.limiter = RateLimiter() if use_rate_limiter else None
 
+    @staticmethod
+    def _validate_profile_input(profile_url: str) -> str:
+        """Validate and normalize a profile URL or username.
+
+        Args:
+            profile_url: Full LinkedIn URL or bare username.
+
+        Returns:
+            Validated full LinkedIn profile URL.
+
+        Raises:
+            ValueError: If the input is not a valid LinkedIn profile URL or username.
+        """
+        if profile_url.startswith("http"):
+            if not (profile_url.startswith("https://www.linkedin.com/")
+                    or profile_url.startswith("https://linkedin.com/")):
+                raise ValueError(
+                    f"Invalid LinkedIn URL: '{profile_url}'. "
+                    "Must start with https://www.linkedin.com/ or https://linkedin.com/."
+                )
+            return profile_url
+        else:
+            # Bare username: allow alphanumeric, hyphens, no path traversal
+            if not re.match(r'^[a-zA-Z0-9\-]+$', profile_url):
+                raise ValueError(
+                    f"Invalid LinkedIn username: '{profile_url}'. "
+                    "Username may only contain alphanumeric characters and hyphens."
+                )
+            return f"https://www.linkedin.com/in/{profile_url}"
+
     def view_profile(self, profile_url: str) -> str:
         """Navigate to profile and return screenshot.
 
         Args:
-            profile_url: LinkedIn profile URL (full or just username)
+            profile_url: LinkedIn profile URL (full or just username).
 
         Returns:
-            base64 PNG screenshot of profile top section.
+            Screenshot file path of profile top section.
+
+        Raises:
+            ValueError: If the URL/username is invalid.
         """
         if self.limiter:
             if not self.limiter.can_view_profile():
@@ -43,8 +77,7 @@ class LinkedInProfile(LinkedInBot):
                 return ""
             self.limiter.wait_if_needed('profile_views')
 
-        if not profile_url.startswith('http'):
-            profile_url = f"https://www.linkedin.com/in/{profile_url}"
+        profile_url = self._validate_profile_input(profile_url)
 
         print(f"📋 Viewing profile: {profile_url}")
         self.navigate_to(profile_url, wait_seconds=10, reconnect_pattern="/in/")

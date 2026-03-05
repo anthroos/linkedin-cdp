@@ -12,3 +12,10 @@ __pycache__/
 # Temporary files
 *.log
 *.tmp
+
+# Templates
+templates/
+
+# Environment
+.env
+.env.*

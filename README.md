@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-LinkedIn automation toolkit using Chrome DevTools Protocol (CDP). Human-like behavior to avoid detection.
+LinkedIn automation toolkit using Chrome DevTools Protocol (CDP). Uses **screenshot-based** interaction with human-like behavior to avoid detection.
 
 ## Disclaimer
 
@@ -13,38 +13,50 @@ LinkedIn automation toolkit using Chrome DevTools Protocol (CDP). Human-like beh
 > - Respect other users' privacy and LinkedIn's rate limits
 > - Do not use for spam, harassment, or any malicious purposes
 
+## Key Concept: Screenshot-Based Automation
+
+This library does **not** parse the DOM or extract text from HTML. Instead:
+
+1. All **actions** use CDP Input domain (mouse movements, keyboard input, scrolling)
+2. All **data reading** uses `Page.captureScreenshot` -- the caller interprets screenshots visually (e.g., via an AI vision model)
+3. **Zero DOM access** -- no `Runtime.evaluate`, no `querySelector`, no `innerText`
+
+Screenshots are saved as **JPEG files** to `/tmp/li_screenshots/` and methods return **file paths** (not base64). The last 50 screenshots are kept automatically.
+
 ## Features
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| Send Messages | ✅ | Send messages in conversations |
-| Read Messages | ✅ | Read conversation history |
-| Search People | ✅ | Search LinkedIn for people |
-| View Profiles | ✅ | Extract profile information |
-| Connection Requests | ✅ | Send connection requests |
-| Rate Limiting | ✅ | Built-in protection against blocks |
-| Human-like Behavior | ✅ | Random delays, natural typing |
+| Send Messages | Done | Click input, type, press Enter in conversations |
+| Read Messages | Done | Screenshot conversation threads |
+| Search People | Done | Navigate to search results, return screenshots |
+| Search Companies | Done | Navigate to company search results |
+| View Profiles | Done | Screenshot profiles with scroll-and-capture |
+| Connection Requests | Done | Screenshot-driven connect workflow |
+| Rate Limiting | Done | Built-in daily limits and delays |
+| Human-like Behavior | Done | Bezier mouse curves, random delays, typing jitter |
 
 ## How It Works
 
 ```
-┌─────────────────┐     WebSocket      ┌─────────────────┐
-│  Python Script  │ ◄────────────────► │  Google Chrome  │
-│  (linkedin_cdp) │     CDP Protocol   │  (debugging on) │
-└─────────────────┘                    └────────┬────────┘
-                                               │
-                                               ▼
-                                      ┌─────────────────┐
-                                      │    LinkedIn     │
-                                      │   (logged in)   │
-                                      └─────────────────┘
++------------------+     WebSocket      +------------------+
+|  Python Script   | <----------------> |  Google Chrome   |
+|  (linkedin_cdp)  |     CDP Protocol   |  (debugging on)  |
++------------------+                    +--------+---------+
+                                                 |
+                                                 v
+                                        +------------------+
+                                        |    LinkedIn      |
+                                        |   (logged in)    |
+                                        +------------------+
 ```
 
 1. **Chrome** runs with `--remote-debugging-port=9222`
 2. **Python script** connects to Chrome via WebSocket
-3. Script sends **CDP commands** (click, type, navigate)
+3. Script sends **CDP commands** (mouse input, keyboard input, navigate, screenshot)
 4. Chrome executes commands on LinkedIn page
-5. All actions look **human-like** (delays, slow typing)
+5. Screenshots are saved as **JPEG files** for the caller to interpret
+6. All mouse movements use **cubic Bezier curves** with randomized control points
 
 ## Installation
 
@@ -57,6 +69,11 @@ cd linkedin-cdp
 
 ### 2. Install dependencies
 
+```bash
+pip3 install -r requirements.txt
+```
+
+Or manually:
 ```bash
 pip3 install websocket-client requests
 ```
@@ -74,19 +91,19 @@ chmod +x chrome_debug.sh
 # macOS
 open -a 'Google Chrome' --args \
     --remote-debugging-port=9222 \
-    --remote-allow-origins=* \
+    --remote-allow-origins=http://localhost,http://127.0.0.1 \
     --user-data-dir="$HOME/chrome-debug-profile"
 
 # Linux
 google-chrome \
     --remote-debugging-port=9222 \
-    --remote-allow-origins=* \
+    --remote-allow-origins=http://localhost,http://127.0.0.1 \
     --user-data-dir="$HOME/chrome-debug-profile"
 
 # Windows
 chrome.exe ^
     --remote-debugging-port=9222 ^
-    --remote-allow-origins=* ^
+    --remote-allow-origins=http://localhost,http://127.0.0.1 ^
     --user-data-dir="%USERPROFILE%\chrome-debug-profile"
 ```
 
@@ -105,18 +122,23 @@ curl -s http://localhost:9222/json/version | python3 -c "import sys,json; print(
 ### Quick Start
 
 ```python
-from linkedin_cdp import LinkedInBot
+from linkedin_messages import LinkedInMessages
 
-bot = LinkedInBot()
-bot.connect()
+lm = LinkedInMessages()
+lm.connect()
 
-# Send a message in current conversation
-bot.send_message("Hello! How are you?")
+# Screenshot the conversations list (returns file path)
+screenshot_path = lm.screenshot_conversations()
+# -> caller uses vision model to interpret the screenshot
+# -> vision model returns coordinates of the conversation to click
 
-# Click on a conversation by index
-bot.click_conversation(2)
+# Open a conversation (caller provides coordinates from screenshot)
+screenshot_path = lm.open_conversation(click_x=350, click_y=250)
 
-bot.close()
+# Send a message (caller provides input field coordinates from screenshot)
+screenshot_path = lm.send_message(input_x=500, input_y=700, text="Hello!")
+
+lm.close()
 ```
 
 ### Search for People
@@ -127,11 +149,10 @@ from linkedin_search import LinkedInSearch
 search = LinkedInSearch()
 search.connect()
 
-# Search for people
-results = search.search_people("AI Engineer San Francisco")
-
-for person in results:
-    print(f"{person['name']} - {person['title']}")
+# Returns list of screenshot file paths (NOT dicts)
+screenshots = search.search_people("AI Engineer San Francisco", scroll_pages=2)
+# screenshots = ["/tmp/li_screenshots/shot_0001.jpg", ...]
+# Caller interprets each screenshot visually
 
 search.close()
 ```
@@ -144,30 +165,46 @@ from linkedin_profile import LinkedInProfile
 profile = LinkedInProfile()
 profile.connect()
 
-# Get profile data
-data = profile.get_profile("https://linkedin.com/in/username")
-print(f"Name: {data['name']}")
-print(f"Title: {data['title']}")
-print(f"Location: {data['location']}")
+# Returns screenshot file path (NOT a dict)
+screenshot = profile.view_profile("https://www.linkedin.com/in/username")
+
+# Or capture full profile by scrolling
+screenshots = profile.screenshot_full_profile(
+    "https://www.linkedin.com/in/username",
+    scroll_count=5
+)
 
 profile.close()
 ```
 
-### Send Connection Request
+### Send Connection Request (Screenshot-Driven)
 
 ```python
 from linkedin_connect import LinkedInConnect
 
-connect = LinkedInConnect()
-connect.connect()
+conn = LinkedInConnect()
+conn.connect()
 
-# Send connection with note
-connect.send_request(
-    profile_url="https://linkedin.com/in/username",
-    note="Hi! I'd love to connect and discuss AI."
+# Step 1: View profile -- returns screenshot path
+screenshot = conn.view_profile("https://www.linkedin.com/in/username")
+# Caller reads screenshot to find Connect button coordinates
+
+# Step 2: Click Connect button (coordinates from screenshot)
+screenshot = conn.click_at(x=600, y=350)
+# Caller reads screenshot to find "Add a note" button
+
+# Step 3: Click "Add a note" (coordinates from screenshot)
+screenshot = conn.click_at(x=400, y=500)
+# Caller reads screenshot to find note textarea
+
+# Step 4: Type note
+screenshot = conn.send_connection_note(
+    input_x=400, input_y=450,
+    note="Hi! I'd love to connect."
 )
+# Caller reads screenshot to find Send button and clicks it
 
-connect.close()
+conn.close()
 ```
 
 ### Rate Limiting
@@ -179,7 +216,7 @@ limiter = RateLimiter()
 
 # Check if action is allowed
 if limiter.can_send_message():
-    bot.send_message("Hello!")
+    # ... send message ...
     limiter.record_message()
 else:
     print(f"Daily limit reached. Resets in {limiter.time_until_reset()}")
@@ -192,73 +229,115 @@ print(limiter.get_stats())
 
 ### LinkedInBot (linkedin_cdp.py)
 
-| Method | Description |
-|--------|-------------|
-| `connect()` | Connect to Chrome |
-| `send_message(text)` | Type and send message |
-| `click_conversation(index)` | Click conversation (1-based) |
-| `click_element(selector)` | Click element by CSS selector |
-| `type_text(text)` | Type text human-like |
-| `get_current_conversation()` | Get name of current chat partner |
-| `get_conversations_list(limit)` | List visible conversations |
-| `scroll_conversations(direction)` | Scroll conversation list |
-| `find_conversation_by_name(name)` | Search for conversation by name |
-| `read_current_messages()` | Read messages in current thread |
-| `reconnect_to_tab(pattern)` | Reconnect WebSocket after navigation |
-| `close()` | Close connection |
+Base class for all LinkedIn automation. Handles CDP connection, human-like mouse/keyboard input, and screenshots.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `connect()` | `bool` | Connect to Chrome via CDP WebSocket |
+| `close()` | `None` | Close WebSocket connection |
+| `reconnect_to_tab(url_pattern)` | `bool` | Reconnect WebSocket to a tab matching pattern |
+| `navigate_to(url, wait_seconds=8, reconnect_pattern=None)` | `bool` | Navigate to URL (must be linkedin.com), wait, reconnect |
+| `take_screenshot()` | `str` | Capture viewport as JPEG, return file path |
+| `take_screenshot_base64()` | `str` | Capture viewport as base64 PNG (legacy) |
+| `save_screenshot(path, safe_dir=None)` | `bool` | Save screenshot to file (path-validated) |
+| `wait_for_page(seconds=3.0)` | `str` | Wait for page to stabilize, return screenshot path |
+| `click_at(x, y, wait=1.5)` | `str` | Click at coordinates, return screenshot path |
+| `type_text(text, human_like=True)` | `None` | Type text character by character |
+| `type_and_screenshot(text, wait=1.0)` | `str` | Type text and return screenshot path |
+| `press_key(key, modifiers=0)` | `None` | Press a keyboard key (Enter, Tab, Escape, etc.) |
+| `scroll_wheel(delta_y=300, delta_x=0, x=None, y=None)` | `None` | Scroll via mouse wheel |
+| `scroll_and_screenshot(delta_y=600, wait=2.0)` | `str` | Scroll and return screenshot path |
+
+### LinkedInMessages (linkedin_messages.py)
+
+Messaging via screenshots. Extends `LinkedInBot`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `ensure_messaging_page()` | `str` | Navigate to messaging, return screenshot path |
+| `screenshot_conversations()` | `str` | Screenshot the conversation list |
+| `open_conversation(click_x, click_y)` | `str` | Click a conversation, return screenshot of thread |
+| `screenshot_thread()` | `str` | Screenshot the currently open thread |
+| `send_message(input_x, input_y, text)` | `str` | Click input, type text, press Enter, return screenshot |
+| `scroll_thread_up()` | `str` | Scroll up in thread, return screenshot |
+| `scroll_thread_down()` | `str` | Scroll down in thread, return screenshot |
+| `scroll_conversations_down()` | `str` | Scroll conversation list, return screenshot |
+| `collect_screenshots(coords_list, pause=2.0)` | `list[str]` | Click through conversations, screenshot each |
 
 ### LinkedInSearch (linkedin_search.py)
 
-| Method | Description |
-|--------|-------------|
-| `search_people(query, limit=10)` | Search for people |
-| `search_companies(query, limit=10)` | Search for companies |
-| `get_search_results()` | Get current page results |
+People and company search. Extends `LinkedInBot`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `search_people(query, scroll_pages=1)` | `list[str]` | Search people, return list of screenshot paths |
+| `search_companies(query, scroll_pages=1)` | `list[str]` | Search companies, return list of screenshot paths |
+| `next_page(next_button_x, next_button_y)` | `str` | Click Next button, return screenshot path |
 
 ### LinkedInProfile (linkedin_profile.py)
 
-| Method | Description |
-|--------|-------------|
-| `get_profile(url)` | Get full profile data |
-| `get_experience()` | Get work experience |
-| `get_education()` | Get education |
-| `get_skills()` | Get skills list |
+Profile viewing via screenshots. Extends `LinkedInBot`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `view_profile(profile_url)` | `str` | Navigate to profile, return screenshot path |
+| `screenshot_full_profile(profile_url, scroll_count=5)` | `list[str]` | Capture full profile via scrolling |
+| `scroll_to_section(delta_y=700)` | `str` | Scroll profile, return screenshot path |
 
 ### LinkedInConnect (linkedin_connect.py)
 
-| Method | Description |
-|--------|-------------|
-| `send_request(url, note=None)` | Send connection request |
-| `withdraw_request(url)` | Withdraw pending request |
-| `accept_request(name)` | Accept incoming request |
+Connection management via screenshots. Extends `LinkedInBot`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `view_profile(profile_url)` | `str` | Navigate to profile, return screenshot path |
+| `send_connection_note(input_x, input_y, note)` | `str` | Type connection note, return screenshot path |
+| `screenshot_invitations()` | `str` | Screenshot pending invitations page |
+| `screenshot_sent_invitations()` | `str` | Screenshot sent invitations page |
+| `accept_invitation(accept_x, accept_y)` | `str` | Click Accept on an invitation, return screenshot path |
+| `scroll_invitations()` | `str` | Scroll invitations list, return screenshot path |
 
 ### RateLimiter (rate_limiter.py)
 
-| Method | Description |
-|--------|-------------|
-| `can_send_message()` | Check if can send message |
-| `can_view_profile()` | Check if can view profile |
-| `can_send_connection()` | Check if can send connection |
-| `record_*()` | Record an action |
-| `get_stats()` | Get usage statistics |
+Daily rate limiting with persistent state.
 
-## Rate Limits (Recommended)
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `can_send_message()` | `bool` | Check if can send a message |
+| `can_view_profile()` | `bool` | Check if can view a profile |
+| `can_send_connection()` | `bool` | Check if can send connection request |
+| `can_search()` | `bool` | Check if can perform a search |
+| `can_accept_connection()` | `bool` | Check if can accept a connection |
+| `record_message()` | `None` | Record a sent message |
+| `record_profile_view()` | `None` | Record a profile view |
+| `record_connection_request()` | `None` | Record a connection request |
+| `record_search()` | `None` | Record a search |
+| `record_connection_accept()` | `None` | Record accepting a connection |
+| `wait_if_needed(action)` | `float` | Wait for required delay, return wait time |
+| `get_stats()` | `dict` | Get current usage statistics |
+| `get_remaining(action)` | `int` | Get remaining count for an action |
+| `time_until_reset()` | `str` | Human-readable time until daily reset |
+| `print_stats()` | `None` | Print formatted usage statistics |
 
-To avoid LinkedIn restrictions:
+## Rate Limits (Defaults)
+
+To avoid LinkedIn restrictions, the following conservative defaults are enforced:
 
 | Action | Daily Limit | Delay Between |
 |--------|-------------|---------------|
-| Messages | 50-100 | 30-60 seconds |
-| Profile Views | 80-150 | 10-30 seconds |
-| Connection Requests | 20-50 | 60-120 seconds |
-| Searches | 30-50 | 15-45 seconds |
+| Messages | 50 | 30-60 seconds |
+| Profile Views | 100 | 10-30 seconds |
+| Connection Requests | 25 | 60-120 seconds |
+| Searches | 30 | 15-45 seconds |
+| Connection Accepts | 50 | 5-15 seconds |
 
-These limits are configurable in `rate_limiter.py`.
+These limits are configurable via `RateLimiter(limits={...}, delays={...})`.
 
 ## Human-like Behavior
 
-Built-in delays to mimic human behavior:
+Built-in delays and mouse movement to mimic human behavior:
 
+- **Mouse movement**: Cubic Bezier curves with randomized control points, micro-jitter, overshoot correction
 - **Typing speed**: 80-200ms per character
 - **Space/punctuation**: 150-450ms pause
 - **Thinking pauses**: 300-600ms occasionally
@@ -269,21 +348,19 @@ Built-in delays to mimic human behavior:
 
 ```
 linkedin-cdp/
-├── linkedin_cdp.py         # Core CDP connection & messaging
-├── linkedin_search.py      # People/company search
-├── linkedin_profile.py     # Profile data extraction
-├── linkedin_connect.py     # Connection requests
-├── linkedin_send.py        # Bulk messaging example
+├── linkedin_cdp.py         # Core CDP connection, mouse/keyboard input, screenshots
+├── linkedin_messages.py    # Messaging (screenshot-based)
+├── linkedin_search.py      # People/company search (screenshot-based)
+├── linkedin_profile.py     # Profile viewing (screenshot-based)
+├── linkedin_connect.py     # Connection requests (screenshot-based)
+├── linkedin_send.py        # Example messaging script
 ├── rate_limiter.py         # Rate limiting & protection
 ├── chrome_debug.sh         # Chrome launcher script
+├── requirements.txt        # Python dependencies
 ├── README.md               # This file
-├── SKILL_LINKEDIN_CDP.md   # Detailed usage guide & best practices
+├── USE_CASES.md            # Usage examples
 └── LICENSE                 # MIT License
 ```
-
-## Documentation
-
-For detailed usage guide, best practices, and known limitations, see **[SKILL_LINKEDIN_CDP.md](SKILL_LINKEDIN_CDP.md)**.
 
 ## Troubleshooting
 
@@ -292,25 +369,24 @@ For detailed usage guide, best practices, and known limitations, see **[SKILL_LI
 - Check: `curl http://localhost:9222/json`
 
 ### "WebSocket 403 Forbidden"
-- Add `--remote-allow-origins=*` flag to Chrome
-
-### Elements not found
-- LinkedIn frequently updates their DOM
-- Check selectors in browser DevTools
-- Use `bot._evaluate('your JS code')` for custom queries
+- Add `--remote-allow-origins=http://localhost,http://127.0.0.1` flag to Chrome
 
 ### Account restricted
-- You're likely hitting rate limits too fast
+- You are likely hitting rate limits too fast
 - Use the RateLimiter module
 - Add longer delays between actions
-- Don't send identical messages
+- Do not send identical messages
 
 ## Security
 
 - **Never commit** `chrome-debug-profile/` (contains your cookies!)
 - Add to `.gitignore`: `chrome-debug-profile/`
-- Don't share your debug Chrome profile
+- Do not share your debug Chrome profile
 - Use a separate LinkedIn account for testing
+- The debug port should only be used on trusted networks
+- Navigation is restricted to `linkedin.com` URLs (SSRF protection)
+- Screenshot paths are validated against path traversal
+- State file permissions are set to `0600` (owner read/write only)
 
 ## Contributing
 
@@ -324,12 +400,6 @@ Contributions are welcome! Please:
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.
-
-## Acknowledgments
-
-- Chrome DevTools Protocol documentation
-- LinkedIn automation community
-- Contributors and testers
 
 ---
 
