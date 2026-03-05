@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import threading
 import time
 from typing import Optional
@@ -26,6 +27,7 @@ import requests
 import websocket
 
 CDP_PORT = 9222
+MAX_SCREENSHOT_DIM = 1920  # Max pixel dimension for Claude API compatibility
 
 
 class LinkedInBot:
@@ -434,6 +436,7 @@ class LinkedInBot:
         )
         with open(path, 'wb') as f:
             f.write(base64.b64decode(data))
+        self._resize_screenshot(path)
         self._cleanup_old_screenshots()
         return path
 
@@ -451,6 +454,40 @@ class LinkedInBot:
                     os.remove(f)
                 except OSError:
                     pass
+
+    @staticmethod
+    def _resize_screenshot(path: str, max_dim: int = MAX_SCREENSHOT_DIM) -> bool:
+        """Resize screenshot if any dimension exceeds max_dim. Uses macOS sips.
+
+        Returns True if resized, False if no resize needed or on error.
+        """
+        try:
+            result = subprocess.run(
+                ["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
+                capture_output=True, text=True, timeout=5,
+            )
+            lines = result.stdout.strip().split("\n")
+            w = h = 0
+            for line in lines:
+                if "pixelWidth" in line:
+                    w = int(line.split(":")[-1].strip())
+                elif "pixelHeight" in line:
+                    h = int(line.split(":")[-1].strip())
+            if w <= max_dim and h <= max_dim:
+                return False
+            if w >= h:
+                subprocess.run(
+                    ["sips", "--resampleWidth", str(max_dim), path],
+                    capture_output=True, timeout=10,
+                )
+            else:
+                subprocess.run(
+                    ["sips", "--resampleHeight", str(max_dim), path],
+                    capture_output=True, timeout=10,
+                )
+            return True
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return False
 
     def save_screenshot(self, path: str, safe_dir: str = None) -> bool:
         """Take screenshot and save to specific path. Returns True on success.
@@ -475,6 +512,7 @@ class LinkedInBot:
         if data:
             with open(path, 'wb') as f:
                 f.write(base64.b64decode(data))
+            self._resize_screenshot(path)
             return True
         return False
 
