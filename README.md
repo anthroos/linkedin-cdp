@@ -23,6 +23,13 @@ This library does **not** parse the DOM or extract text from HTML. Instead:
 
 Screenshots are saved as **JPEG files** to `/tmp/li_screenshots/` and methods return **file paths** (not base64). The last 50 screenshots are kept automatically.
 
+> **A vision model in the loop is required.** This library moves the mouse, types,
+> and captures screenshots -- but it does **not** decide *where* to click. Methods
+> like `click_at(x, y)` take pixel coordinates that a caller must supply by looking
+> at the returned screenshot (e.g. GPT-4o, Claude, or a human). The design target is
+> an agent loop: capture screenshot -> vision model reads it -> returns coordinates ->
+> library acts -> repeat. It is not a fire-and-forget scraper.
+
 ## Features
 
 | Feature | Status | Description |

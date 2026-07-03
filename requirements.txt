@@ -1,2 +1,6 @@
 websocket-client>=1.0.0
 requests>=2.25.0
+
+# Optional: cross-platform screenshot resizing (macOS falls back to `sips`).
+# Recommended on Linux/Windows where `sips` is unavailable.
+Pillow>=9.0.0

@@ -457,10 +457,33 @@ class LinkedInBot:
 
     @staticmethod
     def _resize_screenshot(path: str, max_dim: int = MAX_SCREENSHOT_DIM) -> bool:
-        """Resize screenshot if any dimension exceeds max_dim. Uses macOS sips.
+        """Resize screenshot if any dimension exceeds max_dim.
 
-        Returns True if resized, False if no resize needed or on error.
+        Cross-platform: uses Pillow when available (all OSes), falls back to
+        macOS `sips`. No-op if neither is available.
+
+        Returns True if resized, False if no resize needed or unavailable.
         """
+        # Preferred path: Pillow (works on macOS, Linux, Windows)
+        try:
+            from PIL import Image
+
+            with Image.open(path) as img:
+                w, h = img.size
+                if w <= max_dim and h <= max_dim:
+                    return False
+                scale = max_dim / float(max(w, h))
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                fmt = img.format
+                resized = img.resize(new_size, Image.LANCZOS)
+                resized.save(path, format=fmt)
+            return True
+        except ImportError:
+            pass  # Pillow not installed -- try sips fallback
+        except (OSError, ValueError):
+            return False
+
+        # Fallback: macOS sips
         try:
             result = subprocess.run(
                 ["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
@@ -475,16 +498,11 @@ class LinkedInBot:
                     h = int(line.split(":")[-1].strip())
             if w <= max_dim and h <= max_dim:
                 return False
-            if w >= h:
-                subprocess.run(
-                    ["sips", "--resampleWidth", str(max_dim), path],
-                    capture_output=True, timeout=10,
-                )
-            else:
-                subprocess.run(
-                    ["sips", "--resampleHeight", str(max_dim), path],
-                    capture_output=True, timeout=10,
-                )
+            flag = "--resampleWidth" if w >= h else "--resampleHeight"
+            subprocess.run(
+                ["sips", flag, str(max_dim), path],
+                capture_output=True, timeout=10,
+            )
             return True
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return False
