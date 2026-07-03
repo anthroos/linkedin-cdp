@@ -19,3 +19,6 @@ templates/
 # Environment
 .env
 .env.*
+
+# Session recordings/screenshots - real profiles, NEVER commit
+recordings/
