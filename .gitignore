@@ -22,3 +22,9 @@ templates/
 
 # Session recordings/screenshots - real profiles, NEVER commit
 recordings/
+
+# Personal runner scripts — contain real prospect data / unrestricted CDP. NEVER publish.
+batch_invite.py
+send_invite.py
+send_invite_2nd_degree.py
+browser_cdp.py
